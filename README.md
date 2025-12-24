@@ -93,3 +93,34 @@ with GRUB and Multiboot2, lowering the barrier for testing kernels on real hardw
 - This is not a full bootloader
 - This is not a production-ready kernel
 - KASLR and relocation are intentionally out of scope (for now, contributions are always welcome!)
+
+---
+
+## License
+- This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+- Third-party components retain their original licenses; see their respective headers or upstream repositories, and may be removed at any time if licensing terms change.
+
+---
+
+## Author Notes
+
+- This project is **not a general-purpose toolkit or framework**.  
+  It exists to demonstrate and provide Limine-like kernel semantics while remaining compatible with GRUB and Multiboot2.
+
+- The primary motivation is to make it easier for hobby OS developers to test kernels on real hardware using an existing GRUB setup, without repeatedly writing bootable USB images.
+
+- TitanBoot64 is intended as a **reference implementation and starting point**, not as a drop-in dependency.
+
+- Contributions are welcome! Feel free to open issues or pull requests for improvements, bug fixes, or new features.
+
+- Happy coding!
+
+---
+
+## Acknowledgements
+
+- Thanks to the developers of Limine and GRUB for their pioneering work in bootloading and kernel loading.
+- Thanks to [Astrido](https://github.com/asterd-og) for the early framebuffer code.
+- Thanks to the OSDev Wiki for its extensive documentation on Multiboot2 and x86_64 booting.
+
+---
