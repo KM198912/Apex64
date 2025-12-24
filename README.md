@@ -16,6 +16,7 @@
   - Framebuffer early init + flanterm backend (text rendering)
   - Serial (COM1) I/O for early debug
   - Console printing using `printf`-style library
+  - ACPI RSDP discovery via Multiboot2 (exposed through a Limine-like boot structure)
 - Small test harness: draws/fills the framebuffer and prints the Multiboot memory map on boot.
 
 ---
@@ -86,3 +87,9 @@ with GRUB and Multiboot2, lowering the barrier for testing kernels on real hardw
   - Add more drivers (keyboard, PCI, ACPI parsing)
 
 ---
+
+## Non-goals
+
+- This is not a full bootloader
+- This is not a production-ready kernel
+- KASLR and relocation are intentionally out of scope (for now, contributions are always welcome!)
