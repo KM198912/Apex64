@@ -37,6 +37,7 @@ Typical commands:
 
 ```bash
 make
+make ustar
 make run
 ```
 

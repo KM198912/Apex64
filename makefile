@@ -28,7 +28,7 @@ ISO_DIR=iso
 ISO_BOOT_DIR=$(ISO_DIR)/boot
 ISO_BOOT_GRUB_DIR=$(ISO_BOOT_DIR)/grub
 KERNEL_IMAGE=$(BUILD_DIR)/kernel.bin
-ISO_IMAGE=TitanOS.iso
+ISO_IMAGE=Apex64.iso
 
 all: $(ISO_IMAGE)
 
