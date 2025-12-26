@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>  /* for uintptr_t */
+#include <stdbool.h>
 #ifdef TITAN_NO_PTR
     #define TITAN_PTR(TYPE) uint64_t
 #else
@@ -21,6 +22,25 @@ typedef struct TitanFramebuffer {
     uint8_t bpp;
 } TitanFramebuffer;
 
+typedef struct TitanEdid {
+    uint8_t data[128];
+    // Parsed fields for convenience
+    uint8_t header[8];
+    uint16_t manufacturer_id;
+    uint16_t product_code;
+    uint32_t serial_number;
+    uint8_t week_of_manufacture;
+    uint8_t year_of_manufacture;
+    uint8_t edid_version;
+    uint8_t edid_revision;
+    uint8_t video_input_type;
+    uint8_t max_horizontal_image_size;
+    uint8_t max_vertical_image_size;
+    uint8_t display_gamma;
+    uint8_t supported_features;
+    // ... add more parsed fields as needed
+} TitanEdid; 
+
 //hack like CPP, when compiled with no pointer support, we might need them anyway in some rare cases
 #ifdef TITAN_NO_PTR
     #define REINTERPRET_AS(TYPE, VALUE) ((TYPE)(uintptr_t)(VALUE))
@@ -30,13 +50,25 @@ typedef struct TitanFramebuffer {
 
 #define CAST_AS(TYPE, VALUE) ((TYPE)(uintptr_t)(VALUE))
 
+
+#define MAX_BOOT_MODULES 16
+
 typedef struct boot {
     uint64_t mb2_addr;
     uint64_t hhdm_base;
     TitanFramebuffer framebuffer;
     size_t kernel_size;
     void* acpi_ptr;
+    
+    /* Kernel command line (if provided via multiboot) */
+    char cmdline[256];  // Changed from pointer to array
+    
+    size_t module_count;
+    size_t module_sizes[MAX_BOOT_MODULES];  // Changed from pointer to array
+    void *modules[MAX_BOOT_MODULES];        // Changed from pointer to array
+    char* module_path[MAX_BOOT_MODULES];    // Changed from pointer to array
 } boot_t;
+
 extern boot_t TitanBootInfo;
 
 /* phys <-> hhdm */

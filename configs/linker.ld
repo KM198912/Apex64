@@ -10,6 +10,25 @@ SECTIONS
     _kernel_phys_start = .;
 
     /* ---- Low bootstrap domain (VMA=LMA low) ---- */
+
+    /* Small real-mode trampoline & data placed below 1MiB so BIOS calls can run here */
+    . = 0x9000;
+    _real_phys_start = .;
+    .real ALIGN(4K) :
+    {
+        KEEP(*(.real))
+    }
+
+    .real.bss ALIGN(4K) (NOLOAD) :
+    {
+        KEEP(*(.real.bss))
+        KEEP(*(.real.bss.*))
+    }
+
+    /* Physical load base */
+    . = KERNEL_PHYS_BASE;
+    _kernel_phys_start = .;
+
     .multiboot ALIGN(8) :
     {
         KEEP(*(.multiboot))

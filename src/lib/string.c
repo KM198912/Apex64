@@ -1,4 +1,5 @@
 #include <lib/string.h>
+#include <lib/alloc.h>
 
 void *memcpy(void *restrict dest, const void *restrict src, size_t n) {
     uint8_t *restrict pdest = (uint8_t *restrict)dest;
@@ -49,4 +50,49 @@ int memcmp(const void *s1, const void *s2, size_t n) {
     }
 
     return 0;
+}
+
+size_t strlen(const char *s) {
+    size_t len = 0;
+    while (s[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+int strncmp(const char *s1, const char *s2, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (s1[i] != s2[i]) {
+            return (unsigned char)s1[i] - (unsigned char)s2[i];
+        }
+        if (s1[i] == '\0') {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+int strcmp(const char *s1, const char *s2) {
+    size_t i = 0;
+    while (s1[i] && s1[i] == s2[i]) i++;
+    return (unsigned char)s1[i] - (unsigned char)s2[i];
+}
+
+char *strdup(const char *s) {
+    size_t len = strlen(s);
+    char *dup = (char *)kmalloc(len + 1);
+    if (dup) {
+        memcpy(dup, s, len + 1);
+    }
+    return dup;
+}
+
+int atoi(const char *s) {
+    if (!s) return 0;
+    int sign = 1;
+    while (*s == ' ') s++;
+    if (*s == '+' || *s == '-') { if (*s == '-') sign = -1; s++; }
+    int v = 0;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return sign * v;
 }
