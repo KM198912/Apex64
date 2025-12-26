@@ -37,12 +37,19 @@ void enable_sse() {
 void _start(uint64_t mb_addr, uint64_t hhdm_base) {
     TitanBootInfo.mb2_addr  = mb_addr;
     TitanBootInfo.hhdm_base = hhdm_base;
-    enable_sse();
-    
-    uint32_t total_size = *(uint32_t*)PHYS_TO_VIRT(mb_addr);
-    struct multiboot_tag_framebuffer* fb_tag = NULL;
 
-    uintptr_t base = (uintptr_t)PHYS_TO_VIRT(mb_addr);
+    /* Early GDT/TSS init: ensure kernel GDT is loaded before any exceptions/interrupts */
+    extern void gdt_init(uint32_t cpu_id);
+    extern void tss_set_rsp(uint32_t cpu_id, int rsp, void *addr);
+   
+    kprintf("mb_addr: %p, hhdm_base: %p\n", (void*)mb_addr, (void*)hhdm_base);
+    enable_sse();
+    kprintf("SSE enabled.\n");
+    uint32_t total_size = *(uint32_t*)mb_addr;
+    kprintf("Multiboot2 total size: %u bytes\n", total_size);
+        struct multiboot_tag_framebuffer* fb_tag = NULL;
+
+    uintptr_t base = (uintptr_t)mb_addr;
     uintptr_t end  = base + total_size;
 
     // Find framebuffer
@@ -138,7 +145,6 @@ void _start(uint64_t mb_addr, uint64_t hhdm_base) {
     }
 
     TitanBootInfo.kernel_size = (size_t)((uintptr_t)_kernel_load_end - (uintptr_t)_kernel_phys_start);
-    
     kernel_main();
     kernel_run();
 }

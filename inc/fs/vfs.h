@@ -32,6 +32,10 @@ struct vfs_ops {
 
 /* Mount a filesystem at a given path. Returns 0 on success */
 int vfs_mount(const char *path, struct vfs_ops *ops, void *mount_data);
+int vfs_unmount(const char *path);
+
+/* Convenience: list directory entries in a readable form. Returns number of entries or -1 on error */
+int vfs_list_dir(const char *path);
 
 /* Open a file by path. Returns an opaque file handle (struct vfs_fh*) or NULL */
 void *vfs_open(const char *path, size_t *out_size);

@@ -158,11 +158,40 @@ static int ext2_read_inode(struct ext2_fs *fs, uint32_t ino, struct ext2_inode *
 {
     uint32_t index = ino - 1;
     uint32_t inodes_per_block = fs->block_size / fs->inode_size;
-    uint32_t block = fs->inode_table_block + (index / inodes_per_block);
-    uint32_t offset = (index % inodes_per_block) * fs->inode_size;
+
+    /* Determine block group and load the corresponding group descriptor to find the
+     * group's inode table block (handles multiple block groups properly). */
+    uint32_t inodes_per_group = fs->sb.s_inodes_per_group;
+    uint32_t group = index / inodes_per_group;
+    uint32_t local_index = index % inodes_per_group;
+
+    /* group descriptor table starts at sb->s_first_data_block + 1 */
+    uint32_t gd_block_base = fs->sb.s_first_data_block + 1;
+    uint32_t gd_size = 32; /* size of a group descriptor */
+    uint64_t gd_offset_bytes = (uint64_t)group * gd_size;
+    uint32_t gd_blockno = gd_block_base + (gd_offset_bytes / fs->block_size);
+    uint32_t gd_block_off = (uint32_t)(gd_offset_bytes % fs->block_size);
+
+    uint8_t gdbuf[4096];
+    if (ext2_read_block(fs->devname, gd_blockno, gdbuf, sizeof(gdbuf), fs->block_size) != 0) {
+        klog(0, "ext2: failed to read group descriptor for group=%u\n", group);
+        return -1;
+    }
+    uint32_t inode_table = *((uint32_t*)(gdbuf + gd_block_off + 8));
+
+    /* Now compute which block within the inode table holds our inode */
+    uint32_t block = inode_table + (local_index / inodes_per_block);
+    uint32_t offset = (local_index % inodes_per_block) * fs->inode_size;
     uint8_t blockbuf[4096];
     if (ext2_read_block(fs->devname, block, blockbuf, sizeof(blockbuf), fs->block_size) != 0) return -1;
     memcpy(out, blockbuf + offset, sizeof(*out));
+
+    /* Diagnostic: print key inode fields */
+    klog(0, "ext2: read_inode ino=%u group=%u idx=%u inode_table=%u block=%u offset=%u i_size=%u i_blocks=%u\n",
+         ino, group, index, inode_table, block, offset, (unsigned)out->i_size, (unsigned)out->i_blocks);
+    klog(0, "ext2: inode i_block[0..5]=%u %u %u %u %u %u\n",
+         (unsigned)out->i_block[0], (unsigned)out->i_block[1], (unsigned)out->i_block[2],
+         (unsigned)out->i_block[3], (unsigned)out->i_block[4], (unsigned)out->i_block[5]);
     return 0;
 }
 
@@ -172,18 +201,27 @@ static uint32_t ext2_find_in_dir(struct ext2_fs *fs, struct ext2_inode *dir, con
     /* iterate direct blocks only for simplicity */
     for (int i = 0; i < 12; ++i) {
         if (dir->i_block[i] == 0) continue;
+        klog(1, "ext2: scanning dir block %d (blk=%u) for '%s'\n", i, dir->i_block[i], name);
         uint8_t blk[4096];
-        if (ext2_read_block(fs->devname, dir->i_block[i], blk, sizeof(blk), fs->block_size) != 0) continue;
+        if (ext2_read_block(fs->devname, dir->i_block[i], blk, sizeof(blk), fs->block_size) != 0) {
+            klog(0, "ext2: failed to read dir block %u\n", dir->i_block[i]);
+            continue;
+        }
         uint32_t off = 0;
         while (off < fs->block_size) {
             uint32_t inode = *((uint32_t*)(blk + off + 0));
             uint16_t rec_len = *((uint16_t*)(blk + off + 4));
             size_t name_len = (size_t)*(uint8_t*)(blk + off + 6);
             if (!inode) break;
+            if (rec_len == 0 || rec_len > fs->block_size) {
+                klog(0, "ext2: invalid rec_len=%u at offset=%u, aborting\n", (unsigned)rec_len, off);
+                break;
+            }
+            if (name_len >= 256) name_len = 255;
             char entry_name[256];
-            if (name_len >= sizeof(entry_name)) name_len = sizeof(entry_name)-1;
             memcpy(entry_name, blk + off + 8, name_len);
             entry_name[name_len] = '\0';
+            klog(1, "ext2: dir entry ino=%u rec=%u name_len=%zu name=%s\n", inode, (unsigned)rec_len, name_len, entry_name);
             if (strcmp(entry_name, name) == 0) return inode;
             off += rec_len;
             if (rec_len == 0) break;
@@ -209,9 +247,18 @@ static void *ext2_open(void *fs, const char *path, size_t *out_size)
         while (*p && *p != '/') { if (i + 1 < sizeof(comp)) comp[i++] = *p; p++; }
         comp[i] = '\0';
         if (i == 0) break;
+        klog(0, "ext2: resolving component '%s' under current inode (mode=0x%04x size=%u)\n", comp, inode.i_mode, (unsigned)inode.i_size);
         uint32_t ino = ext2_find_in_dir(efs, &inode, comp);
-        if (!ino) return NULL;
-        if (ext2_read_inode(efs, ino, &inode) != 0) return NULL;
+        if (!ino) {
+            klog(0, "ext2: component '%s' not found\n", comp);
+            return NULL;
+        }
+        klog(0, "ext2: component '%s' -> ino=%u\n", comp, ino);
+        if (ext2_read_inode(efs, ino, &inode) != 0) {
+            klog(0, "ext2: failed to read inode %u for component '%s'\n", ino, comp);
+            return NULL;
+        }
+        klog(0, "ext2: after read inode %u: mode=0x%04x size=%u blocks=%u\n", ino, inode.i_mode, (unsigned)inode.i_size, (unsigned)inode.i_blocks);
         if (*p == '/') p++;
     }
 

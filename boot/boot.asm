@@ -96,11 +96,11 @@ SECTION .boot
 SECTION .boot.data
 align 16
 gdt64:
-    dq 0
+    dq 0x0000000000000000           ; 0x00: Null descriptor
 .code: equ $ - gdt64
-    dq (1<<43) | (1<<44) | (1<<47) | (1<<53)  ; code seg
+    dq 0x00209A0000000000           ; 0x08: 64-bit code (L=1, P=1, S=1, type=code)
 .data: equ $ - gdt64
-    dq (1<<44) | (1<<47)                      ; data seg
+    dq 0x0000920000000000           ; 0x10: 64-bit data (P=1, S=1, type=data)
 .ptr:
     dw $ - gdt64 - 1
     dq gdt64
@@ -318,20 +318,27 @@ error:
 
 ; ----------------------------
 BITS 64
+BITS 64
 long_mode_start:
-    xor ax, ax
-    mov ss, ax
+    ; Set valid data segment for SS
+    mov ax, 0x10
     mov ds, ax
     mov es, ax
+    mov ss, ax
+    xor ax, ax
     mov fs, ax
     mov gs, ax
 
+    ; Map stack to HHDM
     mov rsp, stack_top
+    mov rax, HHDM_BASE
+    add rsp, rax
 
-    ; kernel_main(mb2_info_phys, HHDM_BASE)
+    ; Fix mb2_info pointer
     xor rdi, rdi
     mov edi, ebx
-    mov rsi, HHDM_BASE
+    add rdi, rax          ; rdi = mb2_info + HHDM_BASE
+    mov rsi, rax          ; rsi = HHDM_BASE
 
     extern _start
     mov rax, _start
@@ -341,6 +348,7 @@ long_mode_start:
     cli
     hlt
     jmp .hang
+
 
 ; Symbols provided by linker (physical addresses for MB2 address tag)
 extern _kernel_load_end

@@ -1,7 +1,6 @@
 CROSS_PREFIX=/opt/cross64/bin/
 CC=$(CROSS_PREFIX)x86_64-elf-gcc
-CFLAGS=-ffreestanding -O2 -Wall -Wextra -nostdlib -Iinc -mno-red-zone -mcmodel=large -msse -msse2
-DEPFLAGS=-MMD -MP
+CFLAGS=-ffreestanding -O0 -g -fno-stack-protector -fno-omit-frame-pointer -Wall -Wextra -nostdlib -Iinc -mno-red-zone -mcmodel=large -msse -msse2
 NASM=nasm
 NASMFLAGS=-f elf64
 LD=$(CROSS_PREFIX)x86_64-elf-ld
@@ -39,12 +38,12 @@ $(ISO_IMAGE): $(KERNEL_IMAGE)
 	echo 'set timeout=0' > $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo 'set default=0' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
-	echo 'menuentry "MyOS" {' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
-	echo '    multiboot2 /boot/kernel.bin root=/dev/sda1 loglevel=3' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
+	echo 'menuentry "Apex64" {' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
+		echo '    multiboot2 /boot/kernel.bin root=/dev/sda1 loglevel=0' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '    module2 /boot/initrd.img' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '    boot' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '}' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
-	grub-mkrescue -o $(ISO_IMAGE) $(ISO_DIR) -V "TitanOS"
+	grub-mkrescue -o $(ISO_IMAGE) $(ISO_DIR) -V "Apex64"
 
 $(KERNEL_IMAGE): $(OBJ_FILES)
 	mkdir -p $(BUILD_DIR)

@@ -43,7 +43,7 @@ void pmm_init(uint64_t multiboot_phys_addr)
         return;
     }
 
-    struct multiboot_tag *tag = (struct multiboot_tag*)PHYS_TO_VIRT(mb + 8);
+    struct multiboot_tag *tag = (struct multiboot_tag*)(mb + 8);
 
     uint64_t highest = 0;
 
@@ -75,7 +75,7 @@ void pmm_init(uint64_t multiboot_phys_addr)
     for (uint64_t f = 0; f < total_frames; ++f) set_frame_used(f);
 
     /* Now mark available regions as free excluding kernel and reserved ranges */
-    tag = (struct multiboot_tag*)PHYS_TO_VIRT(mb + 8);
+    tag = (struct multiboot_tag*)(mb + 8);
     for (; tag->type != MULTIBOOT_TAG_TYPE_END; tag = (struct multiboot_tag*)((uint8_t*)tag + ((tag->size + 7) & ~7))) {
         if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) {
             struct multiboot_tag_mmap *mm = (struct multiboot_tag_mmap*)tag;
@@ -116,7 +116,7 @@ void pmm_init(uint64_t multiboot_phys_addr)
     for (uint64_t f = 0; f < low_limit_frames && f < total_frames; ++f) set_frame_used(f);
 
     /* Reserve the multiboot info block itself (so we don't clobber tags/modules) */
-    uint32_t mb_total_size = *(uint32_t*)PHYS_TO_VIRT(mb);
+    uint32_t mb_total_size = *(uint32_t*)mb;
     if (mb_total_size > 0) {
         uint64_t mb_start = mb;
         uint64_t mb_end = mb + mb_total_size;
@@ -128,7 +128,7 @@ void pmm_init(uint64_t multiboot_phys_addr)
     }
 
     /* Reserve any multiboot modules (initrd, etc) so they won't be allocated */
-    for (struct multiboot_tag *t = (struct multiboot_tag*)PHYS_TO_VIRT(mb + 8);
+    for (struct multiboot_tag *t = (struct multiboot_tag*)(mb + 8);
          t->type != MULTIBOOT_TAG_TYPE_END;
          t = (struct multiboot_tag*)((uint8_t*)t + ((t->size + 7) & ~7))) {
         if (t->type == MULTIBOOT_TAG_TYPE_MODULE) {

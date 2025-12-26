@@ -29,13 +29,68 @@ int vfs_mount(const char *path, struct vfs_ops *ops, void *mount_data)
             if (!fs) return -1;
             mounts[i].ops = ops;
             mounts[i].fs = fs;
-            klog(1, "vfs: mounted %s\n", mounts[i].mount_point);
+                    klog(1, "vfs: mounted %s\n", mounts[i].mount_point);
             return 0;
         }
     }
     return -1;
 }
 
+int vfs_unmount(const char *path)
+{
+    for (int i = 0; i < MAX_MOUNTS; ++i) {
+        if (mounts[i].ops && strcmp(mounts[i].mount_point, path) == 0) {
+            if (mounts[i].ops->unmount) mounts[i].ops->unmount(mounts[i].fs);
+            klog(1, "vfs: unmounted %s\n", mounts[i].mount_point);
+            mounts[i].ops = NULL;
+            mounts[i].fs = NULL;
+            mounts[i].mount_point[0] = '\0';
+            return 0;
+        }
+    }
+    return -1;
+}
+int vfs_list_dir(const char *path)
+{
+    size_t sz = 0;
+    void *fh = vfs_open(path, &sz);
+    if (!fh) return -1;
+
+    /* Read the full directory blob (size may be 0 for empty dirs) */
+    size_t buf_len = sz ? sz : 4096;
+    uint8_t *buf = kmalloc(buf_len);
+    if (!buf) { vfs_close(fh); return -1; }
+
+    ssize_t r = vfs_read(fh, buf, 0, buf_len);
+    if (r <= 0) {
+        kprintf("vfs: %s appears empty or unreadable (r=%d)\n", path, (int)r);
+        kfree(buf);
+        vfs_close(fh);
+        return 0;
+    }
+
+    kprintf("vfs: listing %s (bytes=%d):\n", path, (int)r);
+    size_t off = 0; int count = 0;
+    while (off + 8 <= (size_t)r) {
+        uint32_t ino = *((uint32_t*)(buf + off + 0));
+        uint16_t rec_len = *((uint16_t*)(buf + off + 4));
+        size_t name_len = (size_t)*(uint8_t*)(buf + off + 6);
+        if (!ino) break;
+        if (rec_len < 8) break;
+        if (name_len > 255) name_len = 255;
+        char name[256];
+        if (off + 8 + name_len <= (size_t)r) memcpy(name, buf + off + 8, name_len);
+        name[name_len] = '\0';
+        kprintf("  %s\n", name);
+        off += rec_len;
+        ++count;
+        if (rec_len == 0) break; /* avoid infinite loop */
+    }
+
+    kfree(buf);
+    vfs_close(fh);
+    return count;
+}
 /* Find best mount by prefix match */
 static struct mount_entry *find_mount(const char *path, const char **rel)
 {
