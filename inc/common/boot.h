@@ -7,6 +7,27 @@
 #else
     #define TITAN_PTR(TYPE) TYPE
 #endif
+#define MAX_CPUS 1024 //match boot.asm, some amd cpus can have more than 256 cpus
+typedef struct TitanCpu {
+    uint32_t apic_id;
+    uint32_t processor_id;
+    bool is_bsp;
+} TitanCpu;
+
+typedef struct TitanSmpInfo {
+    uint32_t cpu_count;
+    TitanCpu cpus[MAX_CPUS];
+} TitanSmpInfo;
+
+typedef void (*titan_goto_fn)(void *arg);
+
+typedef struct titan_mp_info {
+    uint32_t processor_id;
+    uint32_t lapic_id;
+    titan_goto_fn goto_address;
+    uint64_t extra_argument;   // or void *arg
+} titan_mp_info_t;
+
 typedef struct TitanFramebuffer {
     TITAN_PTR(void *) addr;
     uint64_t size;
@@ -67,6 +88,9 @@ typedef struct boot {
     size_t module_sizes[MAX_BOOT_MODULES];  // Changed from pointer to array
     void *modules[MAX_BOOT_MODULES];        // Changed from pointer to array
     char* module_path[MAX_BOOT_MODULES];    // Changed from pointer to array
+    TitanCpu smp_cpus[MAX_CPUS];
+    TitanSmpInfo smp_info;
+    titan_mp_info_t mp_info[MAX_CPUS];
 } boot_t;
 
 extern boot_t TitanBootInfo;

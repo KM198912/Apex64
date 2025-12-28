@@ -2,6 +2,7 @@
 #include <kernel/kprintf.h>
 #include <lib/sys/io.h>
 #include <common/boot.h>
+#include <drivers/acpi.h>
 const char *exception_messages[32] = {
     "Division by zero",
     "Debug",
@@ -163,6 +164,8 @@ void interrupts_reload() {
 
 void interrupts_set_handler(uint8_t vector, void *handler) {
 	idt_handlers[vector] = handler;
+    if (vector >= 32 && vector < 48)
+		ioapic_map_irq(0, vector - 32, vector, false); //ioapic now handles our irqs, no more legacy pic
 }
 
 uint8_t interrupts_alloc_vec() {
@@ -179,14 +182,13 @@ void interrupts_handle_int(context_t *ctx) {
     }
     //handle exceptions with messages
     if (ctx->int_no < sizeof(exception_messages) / sizeof(exception_messages[0])) {
-       //only print the exception number
-       kprintf("%d\n", ctx->int_no);
-        kprintf(LOG_ERROR "Interrupts: Exception %d: %s\n", ctx->int_no, exception_messages[ctx->int_no]);
-        kprintf(LOG_ERROR "  RIP: %llx CS: %llx RFLAGS: %llx\n", ctx->rip, ctx->cs, ctx->rflags);
-        kprintf(LOG_ERROR "  Error code: %llx\n", ctx->err_code);
+        /* Log which CPU had the exception so AP faults don't look like BSP faults */
+     //   kprintf(LOG_ERROR "Interrupts: CPU %u Exception %d: %s\n", apic_get_id(), ctx->int_no, exception_messages[ctx->int_no]);
+      //  kprintf(LOG_ERROR "  RIP: %llx CS: %llx RFLAGS: %llx\n", ctx->rip, ctx->cs, ctx->rflags);
+        //kprintf(LOG_ERROR "  Error code: %llx\n", ctx->err_code);
+        /* Halt only the faulting CPU */
         for(;;) {
-            __asm__ volatile("hlt");
-            __asm__ volatile("cli");
+            __asm__ volatile("cli; hlt");
         }
 
     } else {
@@ -197,5 +199,5 @@ void interrupts_handle_int(context_t *ctx) {
 }
 
 void interrupts_eoi() {
-	outb(0x20, 0x20);
+	apic_eoi();
 }

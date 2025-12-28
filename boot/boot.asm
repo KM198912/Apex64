@@ -5,7 +5,7 @@
 ;  - Low identity map exists for 0..4GiB (2MiB pages)
 ;  - HHDM map exists: virt = HHDM_BASE + phys for phys 0..4GiB (2MiB pages)
 ;  - Framebuffer MMIO typically <4GiB is already mapped via identity+HHDM
-
+;  - Todo: 16-bit AP Trampoline for SMP Bringup
 BITS 32
 
 %define MB2_MAGIC 0xE85250D6
@@ -72,6 +72,14 @@ align 16
 stack_bottom:
     resb 16384
 stack_top:
+
+; Per-AP stacks (each AP gets its own stack to avoid clobbering BSP stack)
+%define AP_STACK_SIZE 0x8000           ; 32 KiB per AP (0x8000 = 32768 bytes)
+%define MAX_APS 1024                ; Max supported APs, threadripper might want this ..... (hobby kernel on a monster? get real)
+
+align 4096
+ap_stacks:
+    resb AP_STACK_SIZE * MAX_APS
 
 align 4096
 global pml4, pdpt_low, pdpt_kern
@@ -318,7 +326,6 @@ error:
 
 ; ----------------------------
 BITS 64
-BITS 64
 long_mode_start:
     ; Set valid data segment for SS
     mov ax, 0x10
@@ -349,6 +356,223 @@ long_mode_start:
     hlt
     jmp .hang
 
+
+; ----------------------------
+; AP startup trampoline (16-bit -> protected -> long mode)
+; To use: copy the bytes between `ap_trampoline_start` and `ap_trampoline_end`
+; to a low physical address (e.g., 0x7000) and issue INIT/SIPI to AP with that vector.
+SECTION .boot
+align 16
+global ap_trampoline_start, ap_trampoline_end, ap_trampoline_jmp_slot, ap_trampoline_jmp_instr, ap_trampoline_pm
+ap_trampoline_start:
+    ; 16-bit real mode entry
+    BITS 16
+    cli
+
+    ; Real-mode marker: write 'R' to physical 0x8000 so BSP can observe progress
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x4000
+    mov di, 0x8000
+    mov BYTE [di], 'R'
+    ; Serial port 0xE9 debug 'R'
+    mov dx, 0x00E9
+    mov al, 'R'
+    out dx, al
+
+    ; Load a minimal GDT from the trampoline itself
+    ; The GDT is at a fixed offset from the start of the trampoline
+    ; ap_trampoline_start + 0x20 = ap_trampoline_gdt
+    ; ap_trampoline_start + 0x38 = ap_trampoline_gdt_ptr
+    BITS 32
+    
+    mov eax, 0x7038
+    lgdt [eax]
+    BITS 16
+    mov BYTE [di], 'H'
+    ; Serial port 0xE9 debug 'H'
+    mov dx, 0x00E9
+    mov al, 'H'
+    out dx, al
+
+    ; Marker before CR0 reads
+    mov dx, 0x00E9
+    mov al, 'G'
+    out dx, al
+
+    ; Enter protected mode
+    mov eax, cr0
+
+    ; Marker after read CR0
+    mov dx, 0x00E9
+    mov al, 'J'
+    out dx, al
+
+    or  eax, 1
+
+    ; Marker after set bit
+    mov dx, 0x00E9
+    mov al, 'K'
+    out dx, al
+
+mov cr0, eax
+mov BYTE [di], 'I'
+; Serial port 0xE9 debug 'I'
+mov dx, 0x00E9
+mov al, 'I'
+out dx, al
+
+; Use an indirect far-jump via a memory pointer to avoid operand-size complexities
+ap_trampoline_jmp_slot:
+    ; placeholder for patched far-jump (8 bytes): 66 EA dd dd dd dd dw dw
+    times 8 db 0x90
+
+    ; Compute absolute physical address of jump slot and use register-indirect far JMP
+    ; Note: expression below is evaluated at assemble time and yields a constant (no external relocation)
+    ; Short-jump into the patched instruction area that will contain an EA immediate
+    jmp short ap_trampoline_jmp_instr
+
+    ; Debug: if the short jump fails and execution continues here, report and halt
+    mov dx, 0x00E9
+    mov al, 'F'
+    out dx, al
+    hlt
+
+ap_trampoline_jmp_instr:
+    ; placeholder for EA immediate instruction: 66 EA dd dd dd dd dw dw
+    times 8 db 0x90
+
+; Fallback marker: if we see 'Z' here it means the far-jump failed and execution continued
+mov dx, 0x00E9
+mov al, 'Z'
+out dx, al
+
+; Minimal GDT for AP trampoline (must be in the trampoline section)
+align 8
+ap_trampoline_gdt:
+    dq 0x0000000000000000           ; Null descriptor
+    dq 0x00CF9A000000FFFF           ; 0x08: 32-bit code (P=1, S=1, type=code, D/B=1)
+    dq 0x00A09A0000000000           ; 0x10: 64-bit long-mode code (L=1)
+    dq 0x00CF92000000FFFF           ; 0x18: 32-bit data (P=1, S=1, type=data)
+ap_trampoline_gdt_ptr:
+    dw 0x1F  ; GDT limit (4 descriptors * 8 - 1 = 31 = 0x1F)
+    dd 0x7020  ; GDT base (0x7000 + 0x20, where ap_trampoline_gdt is located)
+; Pad to offset 0xA0 for 32-bit code
+times (0xA0 - ($ - ap_trampoline_start)) db 0x90
+; 32-bit protected mode entry point
+BITS 32
+ap_trampoline_pm:
+    ; Set up data segments and stack in protected mode to avoid GP faults
+    mov ax, 0x18            ; data selector (ap_trampoline_gdt index 3)
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov esp, 0x4000
+
+    ; Protected-mode marker: write 'P' to physical 0x8001
+    mov edi, 0x8001
+    mov BYTE [edi], 'P'
+    ; Serial port 0xE9 debug 'P'
+    mov dx, 0x00E9
+    mov al, 'P'
+    out dx, al
+
+    ; Load PML4 physical address into CR3
+    mov eax, pml4
+    mov cr3, eax
+
+    ; Enable PAE (required for long mode)
+    mov eax, cr4
+    or  eax, (1 << 5)
+    mov cr4, eax
+
+    ; Enable Long Mode (LME)
+    mov ecx, 0xC0000080
+    rdmsr
+    or  eax, (1 << 8)
+    wrmsr
+
+    ; Enable paging (PG)
+    mov eax, cr0
+    or  eax, (1 << 31)
+    mov cr0, eax
+
+    ; Far jump to 64-bit entry (GDT code selector = 0x10)
+    ; Use push/retf in 32-bit mode so the IP is a 32-bit immediate and avoids
+    ; relocations that need 16-bit truncation. Use selector 0x10 (index 2) which is
+    ; the 64-bit code descriptor in the trampoline GDT.
+    push dword ap_trampoline_64_entry - ap_trampoline_start + 0x7000
+    push word 0x10
+    retf
+
+; 64-bit long mode entry
+BITS 64
+ap_trampoline_64_entry:
+    ; Setup data segments
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    xor rax, rax
+    mov fs, ax
+    mov gs, ax
+
+    ; mark long-mode arrival early
+    mov rdi, 0x8002
+    mov BYTE [rdi], 'L'
+    ; Serial port 0xE9 debug 'L'
+    mov dx, 0x00E9
+    mov al, 'L'
+    out dx, al
+
+    ; Setup stack: choose per-CPU stack based on local APIC ID
+    ; Read IA32_APIC_BASE MSR (0x1B) to find LAPIC physical base
+    mov ecx, 0x1B
+    rdmsr
+        mov BYTE [rdi], 'M'
+    ; Serial port 0xE9 debug 'L'
+    mov dx, 0x00E9
+    mov al, 'M'
+    out dx, al
+    ; rdx:rax -> physical apic base
+    mov rbx, rdx
+    shl rbx, 32
+    or  rbx, rax
+    and rbx, 0xFFFFF000
+    mov rax, HHDM_BASE
+    add rbx, rax
+    ; read APIC ID from LAPIC ID register (offset 0x20, ID in bits 24..31)
+    mov eax, dword [rbx + 0x20]
+    shr eax, 24
+    and eax, 0xFF
+    ; EAX now contains the APIC ID (writing to EAX zero-extends RAX)
+    ; multiply by AP_STACK_SIZE (32768 = 0x8000) using shift (<< 15) on RAX
+    sal rax, 15
+    mov ebx, stack_top
+    add ebx, ap_stacks - stack_top
+    mov rcx, HHDM_BASE
+    add rbx, rcx
+    add rax, rbx
+    ; point to top of stack for that AP
+    add rax, AP_STACK_SIZE
+    mov rsp, rax
+
+    ; Call kernel-provided `ap_entry` in the future (hook point).
+    ; Invoke `ap_entry` (if present) so the AP can perform kernel init. If it returns,
+    ; halt the AP.
+    extern ap_entry
+    call ap_entry
+    
+    ; If ap_entry returns, halt the AP
+    cli
+    hlt
+    jmp $
+ap_trampoline_end:
+
+global ap_trampoline_size
+ap_trampoline_size: dq ap_trampoline_end - ap_trampoline_start
 
 ; Symbols provided by linker (physical addresses for MB2 address tag)
 extern _kernel_load_end

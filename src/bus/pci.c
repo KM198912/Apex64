@@ -3,6 +3,7 @@
 #include <kernel/kprintf.h>
 #include <lib/string.h>
 #include <common/boot.h>
+#include <mem/vmm.h>
 
 static struct pci_device devices[PCI_MAX_DEVICES];
 static int device_count = 0;
@@ -23,20 +24,90 @@ int pci_register_class_driver(uint8_t class, uint8_t subclass, pci_probe_fn prob
     return 0;
 }
 
+/* Device-specific drivers (vendor/device matching) */
+#define MAX_PCI_DEVICE_DRIVERS 32
+struct pci_device_driver_entry { uint16_t vendor, device; pci_probe_fn probe; };
+static struct pci_device_driver_entry pci_device_drivers[MAX_PCI_DEVICE_DRIVERS];
+static int pci_device_driver_count = 0;
+
+int pci_register_device_driver(uint16_t vendor, uint16_t device, pci_probe_fn probe)
+{
+    if (pci_device_driver_count >= MAX_PCI_DEVICE_DRIVERS) return -1;
+    pci_device_drivers[pci_device_driver_count].vendor = vendor;
+    pci_device_drivers[pci_device_driver_count].device = device;
+    pci_device_drivers[pci_device_driver_count].probe  = probe;
+    pci_device_driver_count++;
+    return 0;
+}
+
 void pci_probe_devices(void)
 {
     for (int d = 0; d < device_count; ++d) {
         struct pci_device *dev = &devices[d];
+
+        /* Check device-specific drivers first (they take precedence). If a device driver
+           returns 0 (success), we skip class-based probing for that device. If it
+           returns non-zero, the device is considered unhandled and class drivers may run. */
+        bool handled = false;
+        for (int i = 0; i < pci_device_driver_count; ++i) {
+            if (pci_device_drivers[i].vendor == dev->vendor_id &&
+                (pci_device_drivers[i].device == PCI_DEVICE_ANY || pci_device_drivers[i].device == dev->device_id)) {
+                if (pci_device_drivers[i].probe) {
+                    int r = pci_device_drivers[i].probe(dev);
+                    kprintf("pci: device-probe result=%d for %04x:%04x at %02x:%02x.%x\n",
+                            r, dev->vendor_id, dev->device_id, dev->bus, dev->device, dev->function);
+                    if (r == 0) { handled = true; break; }
+                }
+            }
+        }
+        if (handled) continue;
+
+        /* Fallback to class-based drivers */
         for (int i = 0; i < pci_driver_count; ++i) {
             if (pci_drivers[i].class == dev->class_code &&
                 (pci_drivers[i].subclass == 0xFF || pci_drivers[i].subclass == dev->subclass)) {
                 if (pci_drivers[i].probe) {
                     int r = pci_drivers[i].probe(dev);
-                    kprintf("pci: probe result=%d for %02x:%02x.%x\n", r, dev->bus, dev->device, dev->function);
+                    kprintf("pci: class-probe result=%d for %02x:%02x.%x\n", r, dev->bus, dev->device, dev->function);
                 }
             }
         }
     }
+}
+
+/* Simple MMIO allocator and mapper: maps BAR physical pages into a kernel VA range
+   starting just after the kernel image. This ensures PTEs exist even if HHDM
+   mapping does not cover the device's BAR window. */
+static uint64_t mmio_alloc_ptr = 0;
+static inline uint64_t align_up(uint64_t v, uint64_t a) { return (v + (a-1)) & ~(a-1); }
+static uint64_t map_mmio(uint64_t phys, uint64_t size)
+{
+    if (size == 0) return 0;
+    uint64_t phys_base = phys & ~0xFFFULL;
+    uint64_t offset = phys & 0xFFFULL;
+    uint64_t map_size = align_up(size + offset, 0x1000);
+
+    if (!mmio_alloc_ptr) {
+        extern char _kernel_end;
+        uint64_t base = align_up((uint64_t)&_kernel_end, 0x1000);
+        /* leave a small gap after kernel for safety */
+        mmio_alloc_ptr = base + 0x200000; /* +2MiB */
+    }
+
+    uint64_t virt_base = align_up(mmio_alloc_ptr, 0x1000);
+    mmio_alloc_ptr = virt_base + map_size;
+
+    for (uint64_t off = 0; off < map_size; off += 0x1000) {
+        uint64_t v = virt_base + off;
+        uint64_t p = phys_base + off;
+        int r = vmm_map_page(v, p, VMM_PTE_W);
+        if (r < 0) {
+            kprintf(LOG_ERROR "pci: vmm_map_page failed virt=0x%llx phys=0x%llx\n", (unsigned long long)v, (unsigned long long)p);
+            return 0;
+        }
+    }
+
+    return virt_base + offset;
 }
 
 int pci_map_device_bars(struct pci_device* dev)
@@ -46,8 +117,23 @@ int pci_map_device_bars(struct pci_device* dev)
         if (dev->bar_size[b] == 0) continue;
         if (dev->bar_is_io[b]) continue; /* IO not mapped here */
         uint64_t phys = dev->bar[b];
-        /* if within low 4GiB, HHDM mapping exists: use PHYS_TO_VIRT */
-        dev->bar_virt[b] = (uint64_t)PHYS_TO_VIRT(phys);
+        uint64_t size = dev->bar_size[b];
+
+        /* Try HHDM first if within low 4GiB and HHDM likely covers it */
+        if (phys < 0x100000000ULL) {
+            dev->bar_virt[b] = (uint64_t)PHYS_TO_VIRT(phys);
+            /* Validate translation exists */
+            if (vmm_translate(dev->bar_virt[b]) == 0) {
+                dev->bar_virt[b] = 0;
+            }
+        }
+
+        /* If HHDM not usable, map pages explicitly into kernel VA space */
+        if (!dev->bar_virt[b]) {
+            dev->bar_virt[b] = map_mmio(phys, size);
+            if (dev->bar_virt[b]) kprintf(LOG_INFO "pci: mapped BAR%d phys=0x%llx -> virt=0x%llx size=0x%llx\n",
+                                          b, (unsigned long long)phys, (unsigned long long)dev->bar_virt[b], (unsigned long long)size);
+        }
     }
     return 0;
 }
@@ -116,6 +202,16 @@ void pci_write_config_word(uint8_t bus, uint8_t device, uint8_t function, uint8_
     pci_config_write32(bus, device, function, aligned, newv);
 }
 
+void pci_write_config_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint8_t value)
+{
+    uint8_t aligned = offset & ~3;
+    uint32_t orig = pci_config_read32(bus, device, function, aligned);
+    uint32_t shift = (offset & 3) * 8;
+    uint32_t mask = 0xFFu << shift;
+    uint32_t newv = (orig & ~mask) | ((uint32_t)value << shift);
+    pci_config_write32(bus, device, function, aligned, newv);
+}
+
 /* helpers: read 8/16 */
 static inline uint8_t pci_read8(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset)
 {
@@ -179,42 +275,62 @@ static uint64_t pci_probe_bar(uint8_t bus, uint8_t device, uint8_t function, int
     }
 }
 
-void pci_init(void)
+static bool scanned_buses[256];
+
+static void scan_bus(uint8_t bus)
 {
-    device_count = 0;
-    for (uint8_t bus = 0; bus < 8; ++bus) { /* limited to 8 for speed; extend if you need */
-        for (uint8_t dev = 0; dev < 32; ++dev) {
-            uint16_t vendor = pci_read_vendor(bus, dev, 0);
+    if (bus >= 256 || scanned_buses[bus]) return;
+    scanned_buses[bus] = true;
+
+    for (uint8_t dev = 0; dev < 32; ++dev) {
+        uint16_t vendor = pci_read_vendor(bus, dev, 0);
+        if (vendor == 0xFFFF) continue;
+        /* determine multifunction */
+        uint8_t header_type = pci_read8(bus, dev, 0, 0x0E);
+        int max_func = (header_type & 0x80) ? 8 : 1;
+        for (int fn = 0; fn < max_func; ++fn) {
+            vendor = pci_read_vendor(bus, dev, fn);
             if (vendor == 0xFFFF) continue;
-            /* determine multifunction */
-            uint8_t header_type = pci_read8(bus, dev, 0, 0x0E);
-            int max_func = (header_type & 0x80) ? 8 : 1;
-            for (int fn = 0; fn < max_func; ++fn) {
-                vendor = pci_read_vendor(bus, dev, fn);
-                if (vendor == 0xFFFF) continue;
-                uint16_t device_id = pci_read_device(bus, dev, fn);
-                uint32_t cls = pci_config_read32(bus, dev, fn, 0x08);
-                uint8_t class_code = (cls >> 24) & 0xFF;
-                uint8_t subclass = (cls >> 16) & 0xFF;
-                uint8_t prog_if = (cls >> 8) & 0xFF;
-                struct pci_device *pd = &devices[device_count];
-                pd->bus = bus; pd->device = dev; pd->function = fn;
-                pd->vendor_id = vendor; pd->device_id = device_id;
-                pd->class_code = class_code; pd->subclass = subclass; pd->prog_if = prog_if;
-                pd->header_type = header_type;
-                for (int b = 0; b < 6; ++b) {
-                    uint8_t is_io = 0; uint64_t sz = 0;
-                    uint64_t addr = pci_probe_bar(bus, dev, fn, b, &is_io, &sz);
-                    pd->bar[b] = addr;
-                    pd->bar_size[b] = sz;
-                    pd->bar_is_io[b] = is_io;
-                    pd->bar_virt[b] = 0;
+            uint16_t device_id = pci_read_device(bus, dev, fn);
+            uint32_t cls = pci_config_read32(bus, dev, fn, 0x08);
+            uint8_t class_code = (cls >> 24) & 0xFF;
+            uint8_t subclass = (cls >> 16) & 0xFF;
+            uint8_t prog_if = (cls >> 8) & 0xFF;
+
+            struct pci_device *pd = &devices[device_count];
+            pd->bus = bus; pd->device = dev; pd->function = fn;
+            pd->vendor_id = vendor; pd->device_id = device_id;
+            pd->class_code = class_code; pd->subclass = subclass; pd->prog_if = prog_if;
+            pd->header_type = header_type;
+            for (int b = 0; b < 6; ++b) {
+                uint8_t is_io = 0; uint64_t sz = 0;
+                uint64_t addr = pci_probe_bar(bus, dev, fn, b, &is_io, &sz);
+                pd->bar[b] = addr;
+                pd->bar_size[b] = sz;
+                pd->bar_is_io[b] = is_io;
+                pd->bar_virt[b] = 0;
+            }
+
+            ++device_count;
+            if (device_count >= PCI_MAX_DEVICES) return;
+
+            /* If this device is a PCI-to-PCI bridge, scan its secondary bus */
+            if (class_code == 0x06 && subclass == 0x04) {
+                uint8_t sec = pci_read_config_byte(bus, dev, fn, 0x19);
+                if (sec != 0 && sec != bus && !scanned_buses[sec]) {
+                    scan_bus(sec);
+                    if (device_count >= PCI_MAX_DEVICES) return;
                 }
-                ++device_count;
-                if (device_count >= PCI_MAX_DEVICES) return;
             }
         }
     }
+}
+
+void pci_init(void)
+{
+    device_count = 0;
+    memset(scanned_buses, 0, sizeof(scanned_buses));
+    scan_bus(0);
 }
 
 int pci_get_device_count(void) { return device_count; }
@@ -250,6 +366,10 @@ void pci_print_devices(void)
         const char *type = pci_class_name(d->class_code, d->subclass, d->prog_if);
         kprintf("[%02d] %02x:%02x.%x %s vendor=0x%04x device=0x%04x\n",
                 i, d->bus, d->device, d->function, type, d->vendor_id, d->device_id);
+                //print class, subclass, prog_if
+        kprintf("      class=0x%02x subclass=0x%02x prog_if=0x%02x\n",
+                d->class_code, d->subclass, d->prog_if);
+    
     }
 }
 

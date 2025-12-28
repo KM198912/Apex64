@@ -6,9 +6,7 @@ uint64_t pit_counter = 0;
 
 void pit_handler(void) {
 	pit_counter++;
-   if (pit_counter % 1000 == 0) {
-       kprintf("PIT: %llu seconds elapsed\n", pit_counter / 1000);
-   }
+	//kprintf("PIT Tick: %llu ms\n", (unsigned long long)pit_counter);
 	interrupts_eoi();
 }
 
@@ -26,4 +24,7 @@ void pit_wait(uint64_t ms) {
 	while (pit_counter < expected) {
         __asm__ volatile("hlt");
     }
+}
+uint64_t pit_get_ticks() {
+	return pit_counter;
 }

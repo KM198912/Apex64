@@ -24,6 +24,10 @@ struct pci_device {
 typedef int (*pci_probe_fn)(struct pci_device* dev);
 int pci_register_class_driver(uint8_t class, uint8_t subclass, pci_probe_fn probe);
 
+/* Device-specific driver registration: use PCI_DEVICE_ANY (0xFFFF) for vendor-only matches */
+#define PCI_DEVICE_ANY 0xFFFF
+int pci_register_device_driver(uint16_t vendor, uint16_t device, pci_probe_fn probe);
+
 /* Probe devices (call registered drivers) */
 void pci_probe_devices(void);
 
@@ -51,6 +55,7 @@ uint32_t pci_read_config_dword(uint8_t bus, uint8_t device, uint8_t function, ui
 uint16_t pci_read_config_word(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
 uint8_t  pci_read_config_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
 void     pci_write_config_word(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint16_t value);
+void     pci_write_config_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint8_t value);
 
 /* higher-level helpers */
 uint16_t pci_read_vendor(uint8_t bus, uint8_t device, uint8_t function);

@@ -23,3 +23,10 @@ typedef struct {
 	uint16_t size;
 	uint64_t addr;
 } __attribute__((packed)) idt_desc_t;
+
+void interrupts_init(void);
+void interrupts_reload(void);
+void interrupts_set_handler(uint8_t vector, void *handler);
+void interrupts_handle_int(context_t *ctx);
+void interrupts_eoi(void);
+void apic_eoi(void);

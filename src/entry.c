@@ -10,8 +10,9 @@ extern char _kernel_bss_end[];
 size_t kernel_size = 0;
 
 /*
-* TitanBoot64 does what no other bootloader dares to do: it enables SSE support
-* right in the entry point, before even calling the kernel main function. This ensures
+* TitanBoot64 dares to do, what the osdev wiki says "we aint ready for" , if you understand, what SSE does,
+* how the registers need to be set, it isnt scary, and can be done as soon as possible,
+* so TitanBoot enables SSE support right in the entry point, before even calling the kernel main function. This ensures
 * that the kernel can immediately leverage the power of SSE instructions for
 * optimized computations, floating-point operations, and data processing from the very start.
 * By enabling SSE early, TitanBoot64 sets the stage for a high-performance computing environment,
@@ -19,7 +20,7 @@ size_t kernel_size = 0;
 * Additionally, this allows for floating point operations in kprintf, which can be very useful for debugging.
 * and bypasses ubsan issues, like __fixdfdi and others, which would require SSE to work properly.
 * For other Developers, if you intend on implementing SMP, make sure to include this either as "extern void enable_sse();" or make it public via a header,
-* then call it for each AP you start, before any floating point or SSE instruction is executed, apart from the Boot Processor (BP).
+* then call it for each AP you start, before any floating point or SSE instruction is executed, apart from the Bootstrap Processor (BSP).
 */
 void enable_sse() {
     __asm__ __volatile__ (
@@ -37,16 +38,8 @@ void enable_sse() {
 void _start(uint64_t mb_addr, uint64_t hhdm_base) {
     TitanBootInfo.mb2_addr  = mb_addr;
     TitanBootInfo.hhdm_base = hhdm_base;
-
-    /* Early GDT/TSS init: ensure kernel GDT is loaded before any exceptions/interrupts */
-    extern void gdt_init(uint32_t cpu_id);
-    extern void tss_set_rsp(uint32_t cpu_id, int rsp, void *addr);
-   
-    kprintf("mb_addr: %p, hhdm_base: %p\n", (void*)mb_addr, (void*)hhdm_base);
     enable_sse();
-    kprintf("SSE enabled.\n");
     uint32_t total_size = *(uint32_t*)mb_addr;
-    kprintf("Multiboot2 total size: %u bytes\n", total_size);
         struct multiboot_tag_framebuffer* fb_tag = NULL;
 
     uintptr_t base = (uintptr_t)mb_addr;

@@ -1,10 +1,11 @@
 CROSS_PREFIX=/opt/cross64/bin/
 CC=$(CROSS_PREFIX)x86_64-elf-gcc
-CFLAGS=-ffreestanding -O0 -g -fno-stack-protector -fno-omit-frame-pointer -Wall -Wextra -nostdlib -Iinc -mno-red-zone -mcmodel=large -msse -msse2
+CFLAGS=-ffreestanding -O0 -g -fno-stack-protector -fno-omit-frame-pointer -DENABLE_FS -Wall -Wextra -nostdlib -Iinc -mno-red-zone -mcmodel=large -msse -msse2
 NASM=nasm
 NASMFLAGS=-f elf64
 LD=$(CROSS_PREFIX)x86_64-elf-ld
 LDFLAGS=-T configs/linker.ld -nostdlib
+DEPFLAGS=-MMD -MP
 
 SRC_DIR=src
 BOOT_DIR=boot
@@ -28,6 +29,7 @@ ISO_BOOT_DIR=$(ISO_DIR)/boot
 ISO_BOOT_GRUB_DIR=$(ISO_BOOT_DIR)/grub
 KERNEL_IMAGE=$(BUILD_DIR)/kernel.bin
 ISO_IMAGE=Apex64.iso
+MAC=52:54:00:12:34:56
 
 all: $(ISO_IMAGE)
 
@@ -39,7 +41,7 @@ $(ISO_IMAGE): $(KERNEL_IMAGE)
 	echo 'set default=0' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo 'menuentry "Apex64" {' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
-		echo '    multiboot2 /boot/kernel.bin root=/dev/sda1 loglevel=0' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
+	echo '    multiboot2 /boot/kernel.bin root=/dev/sda1 loglevel=2' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '    module2 /boot/initrd.img' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '    boot' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
 	echo '}' >> $(ISO_BOOT_GRUB_DIR)/grub.cfg
@@ -64,14 +66,31 @@ clean:
 
 run: $(ISO_IMAGE)
 	qemu-system-x86_64 -M q35 -debugcon stdio -m 4G --enable-kvm -cpu host -rtc base=localtime,clock=host \
-		-drive id=disk,file=disk.img,if=none,format=raw \
 		-device ahci,id=ahci \
 		-device ide-hd,drive=disk,bus=ahci.0 \
+		-drive id=disk,file=disk.img,if=none,format=raw \
 		-device ide-cd,drive=cdrom,bus=ahci.1 \
-		-drive id=cdrom,file=$(ISO_IMAGE),if=none,media=cdrom -boot d
+		-drive id=cdrom,file=$(ISO_IMAGE),if=none,media=cdrom -boot d -smp 6 \
+		-device rtl8139,netdev=br0,mac=$(MAC) \
+		-netdev bridge,id=br0,br=br0
+
+run-debug: $(ISO_IMAGE)
+	qemu-system-x86_64 -M q35 -debugcon stdio -m 2G --enable-kvm -cpu host -rtc base=localtime,clock=host \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=disk,bus=ahci.0 \
+		-drive id=disk,file=disk.img,if=none,format=raw \
+		-device ide-cd,drive=cdrom,bus=ahci.1 \
+		-drive id=cdrom,file=$(ISO_IMAGE),if=none,media=cdrom -boot d -smp 2 \
+		-device rtl8139,netdev=br0,mac=$(MAC) \
+		-netdev bridge,id=br0,br=br0 -no-reboot -no-shutdown
 
 debug: $(ISO_IMAGE)
-	qemu-system-x86_64 -M q35 -cdrom $(ISO_IMAGE) -debugcon stdio -m 1G -s -S --enable-kvm
+	qemu-system-x86_64 -M q35 -cdrom $(ISO_IMAGE) -debugcon stdio -m 1G -s -S --enable-kvm -no-reboot -no-shutdown -cpu host -rtc base=localtime,clock=host \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=disk,bus=ahci.0 \
+		-drive id=disk,file=disk.img,if=none,format=raw \
+		-device ide-cd,drive=cdrom,bus=ahci.1 \
+		-drive id=cdrom,file=$(ISO_IMAGE),if=none,media=cdrom -boot d -smp 6
 
 run-legacy: $(ISO_IMAGE)
 	qemu-system-x86_64 -M pc -cdrom $(ISO_IMAGE) -debugcon stdio -m 4G --enable-kvm -cpu host -rtc base=localtime,clock=host \

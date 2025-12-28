@@ -8,3 +8,4 @@
 
 void pit_init();
 void pit_wait(uint64_t ms);
+uint64_t pit_get_ticks();

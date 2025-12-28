@@ -28,7 +28,30 @@ void kernel_main()
   
     framebuffer_early_init();
 //      gdt_init(0);
-  gdt_init(0);   interrupts_init(); asm volatile("sti"); pit_init();
+  gdt_init(0);   interrupts_init(); asm volatile("sti");
+      kprintf("ACPI RSDP address: %p\n", TitanBootInfo.acpi_ptr);
+    extern void acpi_init();
+    acpi_init();
+    extern void madt_init();
+    madt_init();
+    extern uint64_t find_smp_cores();
+    uint64_t cpu_count = find_smp_cores();
+    kprintf("Detected %llu CPU cores via ACPI MADT.\n", (unsigned long long)cpu_count);
+    extern void madt_populate_smp_info();
+    madt_populate_smp_info();
+    extern void smp_build_mp_info(void);
+    smp_build_mp_info();
+    extern void apic_init();
+    apic_init();
+    /* Initialize PIT before starting APs so pit_wait() works for SIPI timing */
+    pit_init();
+
+    /* Read AP trampoline progress markers at physical addresses 0x8000..0x8002 */
+    uint8_t mark_real = *(volatile uint8_t*)PHYS_TO_VIRT(0x8000);
+    uint8_t mark_pm   = *(volatile uint8_t*)PHYS_TO_VIRT(0x8001);
+    uint8_t mark_long = *(volatile uint8_t*)PHYS_TO_VIRT(0x8002);
+    kprintf(LOG_INFO "SMP markers: real=%c pm=%c long=%c\n",
+            mark_real ? mark_real : '-', mark_pm ? mark_pm : '-', mark_long ? mark_long : '-');
 
     kprintf("Kernel initialized. RSP=%p\n", (void*)rsp);
     pmm_init(TitanBootInfo.mb2_addr);
@@ -45,8 +68,10 @@ void kernel_main()
         struct pci_device *d = pci_get_device(i);
         pci_map_device_bars(d);
     }
-    /* register builtin drivers and probe devices */
+    /* register builtin drivers, extra drivers, and probe devices */
     pci_register_builtin_drivers();
+    /* Register any extra, late-bound drivers (device-specific). Must be done before probing. */
+    pci_register_extra_drivers();
     pci_probe_devices();
       char* root_part = cmdline_get("root");
     if (root_part) {
@@ -63,6 +88,7 @@ void kernel_main()
     } else {
         kprintf("No log level specified in command line.\n");
     }
+    #ifdef ENABLE_FS
   /* If initrd module present, register device and mount it at /initrd so it's always available */
     if (TitanBootInfo.module_count > 0) {
         void *mod = TitanBootInfo.modules[0];
@@ -192,6 +218,12 @@ void kernel_main()
         }
       
     }
+    #endif
+    #ifdef ENABLE_SMP
+    extern void smp_start_aps();
+    smp_start_aps();
+    #endif
+
 }
 
 

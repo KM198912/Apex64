@@ -1,0 +1,578 @@
+     1                                  ; boot.asm — Multiboot2 → long mode with Limine-like mappings done in the stub
+     2                                  ;
+     3                                  ; Contract at kernel_main:
+     4                                  ;  - Kernel executes at KERNEL_VIRT_BASE (higher half)
+     5                                  ;  - Low identity map exists for 0..4GiB (2MiB pages)
+     6                                  ;  - HHDM map exists: virt = HHDM_BASE + phys for phys 0..4GiB (2MiB pages)
+     7                                  ;  - Framebuffer MMIO typically <4GiB is already mapped via identity+HHDM
+     8                                  ;  - Todo: 16-bit AP Trampoline for SMP Bringup
+     9                                  BITS 32
+    10                                  
+    11                                  %define MB2_MAGIC 0xE85250D6
+    12                                  %define MB2_ARCH  0
+    13                                  
+    14                                  %define KERNEL_VIRT_BASE  0xFFFFFFFF80000000
+    15                                  %define HHDM_BASE         0xFFFF800000000000
+    16                                  %define KERNEL_PHYS_BASE  0x00200000
+    17                                  
+    18                                  %define KERNEL_MAP_SIZE   (128 * 1024 * 1024)   ; 128MiB mapped for kernel window
+    19                                  
+    20                                  %define PTE_P   0x001
+    21                                  %define PTE_W   0x002
+    22                                  %define PDE_PS  0x080
+    23                                  
+    24                                  SECTION .multiboot
+    25                                  align 8
+    26                                  mb2_hdr_start:
+    27 00000000 D65052E8                    dd MB2_MAGIC
+    28 00000004 00000000                    dd MB2_ARCH
+    29 00000008 58000000                    dd mb2_hdr_end - mb2_hdr_start
+    30 0000000C D2AEAD17                    dd -(MB2_MAGIC + MB2_ARCH + (mb2_hdr_end - mb2_hdr_start))
+    31                                  
+    32                                      ; Address tag (type 2): request load at KERNEL_PHYS_BASE
+    33                                      align 8
+    34 00000010 0200                        dw 2
+    35 00000012 0000                        dw 0
+    36 00000014 18000000                    dd 24
+    37 00000018 [00000000]                  dd mb2_hdr_start         ; header_addr (physical where header ends up)
+    38 0000001C 00002000                    dd KERNEL_PHYS_BASE      ; load_addr
+    39 00000020 [00000000]                  dd _kernel_load_end      ; load_end_addr (physical) - provided by linker
+    40 00000024 [00000000]                  dd _kernel_bss_end       ; bss_end_addr  (physical) - provided by linker
+    41                                      ; Entry address tag (type 3) — REQUIRED if you use the address tag in GRUB
+    42                                      align 8
+    43 00000028 0300                        dw 3                ; type = entry address
+    44 0000002A 0000                        dw 0                ; flags
+    45 0000002C 0C000000                    dd 12               ; size
+    46 00000030 [00000000]                  dd _TitanBoot       ; entry_addr (32-bit physical address)
+    47                                  
+    48                                      ; Pad to 8-byte boundary for the next tag
+    49 00000034 00000000                    dd 0
+    50                                  
+    51                                      ; Optional framebuffer request tag (type 5)
+    52                                      align 8
+    53 00000038 0500                        dw 5
+    54 0000003A 0000                        dw 0
+    55 0000003C 14000000                    dd 20
+    56 00000040 00000000                    dd 0
+    57 00000044 00000000                    dd 0
+    58 00000048 20000000                    dd 32
+    59                                  
+    60                                      ; End tag
+    61 0000004C 90<rep 4h>                  align 8
+    62 00000050 0000                        dw 0
+    63 00000052 0000                        dw 0
+    64 00000054 08000000                    dd 8
+    65                                  mb2_hdr_end:
+    66                                  
+    67                                  ; ----------------------------
+    68                                  ; Low bootstrap BSS (must stay low)
+    69                                  ; ----------------------------
+    70                                  SECTION .boot.bss nobits
+    71                                  align 16
+    72                                  stack_bottom:
+    73 00000000 <res 4000h>                 resb 16384
+    74                                  stack_top:
+    75                                  
+    76                                  ; Per-AP stacks (each AP gets its own stack to avoid clobbering BSP stack)
+    77                                  %define AP_STACK_SIZE 0x8000           ; 32 KiB per AP (0x8000 = 32768 bytes)
+    78                                  %define MAX_APS 1024                ; Max supported APs, threadripper might want this ..... (hobby kernel on a monster? get real)
+    79                                  
+    80                                  align 4096
+    81                                  ap_stacks:
+    82 00004000 <res 2000000h>              resb AP_STACK_SIZE * MAX_APS
+    83                                  
+    84                                  align 4096
+    85                                  global pml4, pdpt_low, pdpt_kern
+    86                                  global pd_low_0, pd_low_1, pd_low_2, pd_low_3
+    87                                  global pd_kern_0
+    88                                  
+    89 02004000 <res 1000h>             pml4:       resb 4096
+    90 02005000 <res 1000h>             pdpt_low:   resb 4096
+    91 02006000 <res 1000h>             pd_low_0:   resb 4096
+    92 02007000 <res 1000h>             pd_low_1:   resb 4096
+    93 02008000 <res 1000h>             pd_low_2:   resb 4096
+    94 02009000 <res 1000h>             pd_low_3:   resb 4096
+    95                                  
+    96 0200A000 <res 1000h>             pdpt_kern:  resb 4096
+    97 0200B000 <res 1000h>             pd_kern_0:  resb 4096
+    98                                  
+    99                                  ; ----------------------------
+   100                                  ; Low bootstrap data/code (must stay low)
+   101                                  ; ----------------------------
+   102                                  SECTION .boot
+   103                                  
+   104                                  SECTION .boot.data
+   105                                  align 16
+   106                                  gdt64:
+   107 00000000 0000000000000000            dq 0x0000000000000000           ; 0x00: Null descriptor
+   108                                  .code: equ $ - gdt64
+   109 00000008 00000000009A2000            dq 0x00209A0000000000           ; 0x08: 64-bit code (L=1, P=1, S=1, type=code)
+   110                                  .data: equ $ - gdt64
+   111 00000010 0000000000920000            dq 0x0000920000000000           ; 0x10: 64-bit data (P=1, S=1, type=data)
+   112                                  .ptr:
+   113 00000018 1700                        dw $ - gdt64 - 1
+   114 0000001A [0000000000000000]          dq gdt64
+   115                                  
+   116                                  SECTION .boot
+   117                                  global _TitanBoot
+   118                                  _TitanBoot:
+   119 00000000 FA                          cli
+   120                                  
+   121                                      ; Save Multiboot2 info pointer from GRUB
+   122 00000001 89DE                        mov esi, ebx
+   123                                  
+   124                                      ; Stack is in low .boot.bss
+   125 00000003 BC[00400000]                mov esp, stack_top
+   126 00000008 FC                          cld
+   127                                  
+   128 00000009 E844000000                  call check_cpuid
+   129 0000000E E85A000000                  call check_long_mode
+   130                                  
+   131 00000013 E87A000000                  call setup_page_tables
+   132                                  
+   133                                      ; Restore mb2 info pointer
+   134 00000018 89F3                        mov ebx, esi
+   135                                  
+   136                                      ; Enable PAE
+   137 0000001A 0F20E0                      mov eax, cr4
+   138 0000001D 83C820                      or  eax, (1 << 5)
+   139 00000020 0F22E0                      mov cr4, eax
+   140                                  
+   141                                      ; Load CR3 with low address of PML4
+   142 00000023 B8[00400002]                mov eax, pml4
+   143 00000028 0F22D8                      mov cr3, eax
+   144                                  
+   145                                      ; Enable long mode
+   146 0000002B B9800000C0                  mov ecx, 0xC0000080
+   147 00000030 0F32                        rdmsr
+   148 00000032 0D00010000                  or  eax, (1 << 8)
+   149 00000037 0F30                        wrmsr
+   150                                  
+   151                                      ; Enable paging
+   152 00000039 0F20C0                      mov eax, cr0
+   153 0000003C 0D00000080                  or  eax, (1 << 31)
+   154 00000041 0F22C0                      mov cr0, eax
+   155                                  
+   156 00000044 0F0115[18000000]            lgdt [gdt64.ptr]
+   157 0000004B EA[DD010000]0800            jmp gdt64.code:long_mode_start
+   158                                  
+   159                                  ; ----------------------------
+   160                                  check_cpuid:
+   161 00000052 9C                          pushfd
+   162 00000053 58                          pop eax
+   163 00000054 89C1                        mov ecx, eax
+   164 00000056 3500002000                  xor eax, (1 << 21)
+   165 0000005B 50                          push eax
+   166 0000005C 9D                          popfd
+   167 0000005D 9C                          pushfd
+   168 0000005E 58                          pop eax
+   169 0000005F 51                          push ecx
+   170 00000060 9D                          popfd
+   171 00000061 39C8                        cmp eax, ecx
+   172 00000063 7401                        je .no
+   173 00000065 C3                          ret
+   174                                  .no:
+   175 00000066 B043                        mov al, 'C'
+   176 00000068 E959010000                  jmp error
+   177                                  
+   178                                  check_long_mode:
+   179 0000006D B800000080                  mov eax, 0x80000000
+   180 00000072 0FA2                        cpuid
+   181 00000074 3D01000080                  cmp eax, 0x80000001
+   182 00000079 7210                        jb .no
+   183 0000007B B801000080                  mov eax, 0x80000001
+   184 00000080 0FA2                        cpuid
+   185 00000082 F7C200000020                test edx, (1 << 29)
+   186 00000088 7401                        jz .no
+   187 0000008A C3                          ret
+   188                                  .no:
+   189 0000008B B04C                        mov al, 'L'
+   190 0000008D E934010000                  jmp error
+   191                                  
+   192                                  ; ----------------------------
+   193                                  ; setup_page_tables (2MiB pages only):
+   194                                  ; - PML4[0]   -> pdpt_low  (identity 0..4GiB)
+   195                                  ; - PML4[256] -> pdpt_low  (HHDM_BASE + phys for phys 0..4GiB)
+   196                                  ; - PML4[511] -> pdpt_kern (kernel higher-half mapping)
+   197                                  ; ----------------------------
+   198                                  setup_page_tables:
+   199                                      ; Clear tables: pml4 + pdpt_low + 4 PDs + pdpt_kern + pd_kern_0 = 8 pages
+   200 00000092 BF[00400002]                mov edi, pml4
+   201 00000097 B900200000                  mov ecx, (8 * 4096) / 4
+   202 0000009C 31C0                        xor eax, eax
+   203 0000009E F3AB                        rep stosd
+   204                                  
+   205                                      ; PML4[0] -> pdpt_low
+   206 000000A0 B8[00500002]                mov eax, pdpt_low
+   207 000000A5 83C803                      or  eax, (PTE_P | PTE_W)
+   208 000000A8 A3[00400002]                mov [pml4 + 0*8], eax
+   209                                  
+   210                                      ; PML4[256] -> pdpt_low (HHDM)
+   211 000000AD B8[00500002]                mov eax, pdpt_low
+   212 000000B2 83C803                      or  eax, (PTE_P | PTE_W)
+   213 000000B5 A3[00480002]                mov [pml4 + 256*8], eax
+   214                                  
+   215                                      ; PDPT low: 4 entries for 0..4GiB
+   216 000000BA B8[00600002]                mov eax, pd_low_0
+   217 000000BF 83C803                      or  eax, (PTE_P | PTE_W)
+   218 000000C2 A3[00500002]                mov [pdpt_low + 0*8], eax
+   219                                  
+   220 000000C7 B8[00700002]                mov eax, pd_low_1
+   221 000000CC 83C803                      or  eax, (PTE_P | PTE_W)
+   222 000000CF A3[08500002]                mov [pdpt_low + 1*8], eax
+   223                                  
+   224 000000D4 B8[00800002]                mov eax, pd_low_2
+   225 000000D9 83C803                      or  eax, (PTE_P | PTE_W)
+   226 000000DC A3[10500002]                mov [pdpt_low + 2*8], eax
+   227                                  
+   228 000000E1 B8[00900002]                mov eax, pd_low_3
+   229 000000E6 83C803                      or  eax, (PTE_P | PTE_W)
+   230 000000E9 A3[18500002]                mov [pdpt_low + 3*8], eax
+   231                                  
+   232                                      ; Fill each PD with 2MiB pages
+   233 000000EE E84C000000                  call fill_pd0
+   234 000000F3 E865000000                  call fill_pd1
+   235 000000F8 E883000000                  call fill_pd2
+   236 000000FD E8A1000000                  call fill_pd3
+   237                                  
+   238                                      ; Kernel mapping:
+   239                                      ; KERNEL_VIRT_BASE (0xffffffff80000000) lies at PML4=511, PDPT=510.
+   240 00000102 B8[00A00002]                mov eax, pdpt_kern
+   241 00000107 83C803                      or  eax, (PTE_P | PTE_W)
+   242 0000010A A3[F84F0002]                mov [pml4 + 511*8], eax
+   243                                  
+   244                                      ; pdpt_kern[510] -> pd_kern_0
+   245 0000010F B8[00B00002]                mov eax, pd_kern_0
+   246 00000114 83C803                      or  eax, (PTE_P | PTE_W)
+   247 00000117 A3[F0AF0002]                mov [pdpt_kern + 510*8], eax
+   248                                  
+   249                                      ; Fill pd_kern_0: map KERNEL_MAP_SIZE starting at KERNEL_PHYS_BASE with 2MiB pages
+   250 0000011C BF[00B00002]                mov edi, pd_kern_0
+   251 00000121 31C9                        xor ecx, ecx
+   252 00000123 B800002000                  mov eax, KERNEL_PHYS_BASE
+   253                                  .fill_kern:
+   254 00000128 89C2                        mov edx, eax
+   255 0000012A 81CA83000000                or  edx, (PTE_P | PTE_W | PDE_PS)
+   256 00000130 8914CF                      mov [edi + ecx*8], edx
+   257 00000133 0500002000                  add eax, 0x00200000
+   258 00000138 41                          inc ecx
+   259 00000139 83F940                      cmp ecx, (KERNEL_MAP_SIZE >> 21)
+   260 0000013C 75EA                        jne .fill_kern
+   261                                  
+   262 0000013E C3                          ret
+   263                                  
+   264                                  ; --- Helpers to fill identity PDs ---
+   265                                  fill_pd0:
+   266 0000013F BF[00600002]                mov edi, pd_low_0
+   267 00000144 31C9                        xor ecx, ecx
+   268                                  .loop:
+   269 00000146 89C8                        mov eax, ecx
+   270 00000148 C1E015                      shl eax, 21
+   271 0000014B 0D83000000                  or  eax, (PTE_P | PTE_W | PDE_PS)
+   272 00000150 8904CF                      mov [edi + ecx*8], eax
+   273 00000153 41                          inc ecx
+   274 00000154 81F900020000                cmp ecx, 512
+   275 0000015A 75EA                        jne .loop
+   276 0000015C C3                          ret
+   277                                  
+   278                                  fill_pd1:
+   279 0000015D BF[00700002]                mov edi, pd_low_1
+   280 00000162 31C9                        xor ecx, ecx
+   281                                  .loop:
+   282 00000164 89C8                        mov eax, ecx
+   283 00000166 C1E015                      shl eax, 21
+   284 00000169 0500000040                  add eax, 0x40000000
+   285 0000016E 0D83000000                  or  eax, (PTE_P | PTE_W | PDE_PS)
+   286 00000173 8904CF                      mov [edi + ecx*8], eax
+   287 00000176 41                          inc ecx
+   288 00000177 81F900020000                cmp ecx, 512
+   289 0000017D 75E5                        jne .loop
+   290 0000017F C3                          ret
+   291                                  
+   292                                  fill_pd2:
+   293 00000180 BF[00800002]                mov edi, pd_low_2
+   294 00000185 31C9                        xor ecx, ecx
+   295                                  .loop:
+   296 00000187 89C8                        mov eax, ecx
+   297 00000189 C1E015                      shl eax, 21
+   298 0000018C 0500000080                  add eax, 0x80000000
+   299 00000191 0D83000000                  or  eax, (PTE_P | PTE_W | PDE_PS)
+   300 00000196 8904CF                      mov [edi + ecx*8], eax
+   301 00000199 41                          inc ecx
+   302 0000019A 81F900020000                cmp ecx, 512
+   303 000001A0 75E5                        jne .loop
+   304 000001A2 C3                          ret
+   305                                  
+   306                                  fill_pd3:
+   307 000001A3 BF[00900002]                mov edi, pd_low_3
+   308 000001A8 31C9                        xor ecx, ecx
+   309                                  .loop:
+   310 000001AA 89C8                        mov eax, ecx
+   311 000001AC C1E015                      shl eax, 21
+   312 000001AF 05000000C0                  add eax, 0xC0000000
+   313 000001B4 0D83000000                  or  eax, (PTE_P | PTE_W | PDE_PS)
+   314 000001B9 8904CF                      mov [edi + ecx*8], eax
+   315 000001BC 41                          inc ecx
+   316 000001BD 81F900020000                cmp ecx, 512
+   317 000001C3 75E5                        jne .loop
+   318 000001C5 C3                          ret
+   319                                  
+   320                                  ; ----------------------------
+   321                                  error:
+   322 000001C6 C70500800B00454F52-         mov dword [0xB8000], 0x4F524F45
+   322 000001CF 4F                 
+   323 000001D0 A204800B00                  mov byte  [0xB8004], al
+   324 000001D5 C60505800B004F              mov byte  [0xB8005], 0x4F
+   325 000001DC F4                          hlt
+   326                                  
+   327                                  ; ----------------------------
+   328                                  BITS 64
+   329                                  long_mode_start:
+   330                                      ; Set valid data segment for SS
+   331 000001DD 66B81000                    mov ax, 0x10
+   332 000001E1 8ED8                        mov ds, ax
+   333 000001E3 8EC0                        mov es, ax
+   334 000001E5 8ED0                        mov ss, ax
+   335 000001E7 6631C0                      xor ax, ax
+   336 000001EA 8EE0                        mov fs, ax
+   337 000001EC 8EE8                        mov gs, ax
+   338                                  
+   339                                      ; Map stack to HHDM
+   340 000001EE 48BC-                       mov rsp, stack_top
+   340 000001F0 [0040000000000000] 
+   341 000001F8 48B8000000000080FF-         mov rax, HHDM_BASE
+   341 00000201 FF                 
+   342 00000202 4801C4                      add rsp, rax
+   343                                  
+   344                                      ; Fix mb2_info pointer
+   345 00000205 4831FF                      xor rdi, rdi
+   346 00000208 89DF                        mov edi, ebx
+   347 0000020A 4801C7                      add rdi, rax          ; rdi = mb2_info + HHDM_BASE
+   348 0000020D 4889C6                      mov rsi, rax          ; rsi = HHDM_BASE
+   349                                  
+   350                                      extern _start
+   351 00000210 48B8-                       mov rax, _start
+   351 00000212 [0000000000000000] 
+   352 0000021A FFD0                        call rax
+   353                                  
+   354                                  .hang:
+   355 0000021C FA                          cli
+   356 0000021D F4                          hlt
+   357 0000021E EBFC                        jmp .hang
+   358                                  
+   359                                  
+   360                                  ; ----------------------------
+   361                                  ; AP startup trampoline (16-bit -> protected -> long mode)
+   362                                  ; To use: copy the bytes between `ap_trampoline_start` and `ap_trampoline_end`
+   363                                  ; to a low physical address (e.g., 0x7000) and issue INIT/SIPI to AP with that vector.
+   364                                  SECTION .boot
+   365                                  align 16
+   366                                  global ap_trampoline_start, ap_trampoline_end, ap_trampoline_jmp_slot, ap_trampoline_pm
+   367                                  ap_trampoline_start:
+   368                                      ; 16-bit real mode entry
+   369                                      BITS 16
+   370 00000220 FA                          cli
+   371                                  
+   372                                      ; Real-mode marker: write 'R' to physical 0x8000 so BSP can observe progress
+   373 00000221 31C0                        xor ax, ax
+   374 00000223 8ED8                        mov ds, ax
+   375 00000225 8EC0                        mov es, ax
+   376 00000227 8ED0                        mov ss, ax
+   377 00000229 BC0040                      mov sp, 0x4000
+   378 0000022C BF0080                      mov di, 0x8000
+   379 0000022F C60552                      mov BYTE [di], 'R'
+   380                                      ; Serial port 0xE9 debug 'R'
+   381 00000232 BAE900                      mov dx, 0x00E9
+   382 00000235 B052                        mov al, 'R'
+   383 00000237 EE                          out dx, al
+   384                                  
+   385                                      ; Load a minimal GDT from the trampoline itself
+   386                                      ; The GDT is at a fixed offset from the start of the trampoline
+   387                                      ; ap_trampoline_start + 0x20 = ap_trampoline_gdt
+   388                                      ; ap_trampoline_start + 0x38 = ap_trampoline_gdt_ptr
+   389                                      BITS 32
+   390                                      
+   391 00000238 B838700000                  mov eax, 0x7038
+   392 0000023D 0F0110                      lgdt [eax]
+   393                                      BITS 16
+   394 00000240 C60548                      mov BYTE [di], 'H'
+   395                                      ; Serial port 0xE9 debug 'H'
+   396 00000243 BAE900                      mov dx, 0x00E9
+   397 00000246 B048                        mov al, 'H'
+   398 00000248 EE                          out dx, al
+   399                                  
+   400                                      ; Marker before CR0 reads
+   401 00000249 BAE900                      mov dx, 0x00E9
+   402 0000024C B047                        mov al, 'G'
+   403 0000024E EE                          out dx, al
+   404                                  
+   405                                      ; Enter protected mode
+   406 0000024F 0F20C0                      mov eax, cr0
+   407                                  
+   408                                      ; Marker after read CR0
+   409 00000252 BAE900                      mov dx, 0x00E9
+   410 00000255 B04A                        mov al, 'J'
+   411 00000257 EE                          out dx, al
+   412                                  
+   413 00000258 6683C801                    or  eax, 1
+   414                                  
+   415                                      ; Marker after set bit
+   416 0000025C BAE900                      mov dx, 0x00E9
+   417 0000025F B04B                        mov al, 'K'
+   418 00000261 EE                          out dx, al
+   419                                  
+   420 00000262 0F22C0                  mov cr0, eax
+   421 00000265 C60549                  mov BYTE [di], 'I'
+   422                                  ; Serial port 0xE9 debug 'I'
+   423 00000268 BAE900                  mov dx, 0x00E9
+   424 0000026B B049                    mov al, 'I'
+   425 0000026D EE                      out dx, al
+   426                                  
+   427                                  ; Use an indirect far-jump via a memory pointer to avoid operand-size complexities
+   428                                  ap_trampoline_jmp_slot:
+   429                                      ; placeholder for patched far-jump (8 bytes): 66 EA dd dd dd dd dw dw
+   430 0000026E 90<rep 8h>                  times 8 db 0x90
+   431                                  
+   432                                      ; Compute absolute physical address of jump slot and use register-indirect far JMP
+   433                                      ; Note: expression below is evaluated at assemble time and yields a constant (no external relocation)
+   434 00000276 BE4E70                      mov si, ap_trampoline_jmp_slot - ap_trampoline_start + 0x7000
+   435 00000279 66                          db 0x66
+   436 0000027A FF2C                        jmp far [si]
+   437                                  
+   438                                  ; Fallback marker: if we see 'Z' here it means the far-jump failed and execution continued
+   439 0000027C BAE900                  mov dx, 0x00E9
+   440 0000027F B05A                    mov al, 'Z'
+   441 00000281 EE                      out dx, al
+   442                                  
+   443                                  ; Minimal GDT for AP trampoline (must be in the trampoline section)
+   444 00000282 90<rep 6h>              align 8
+   445                                  ap_trampoline_gdt:
+   446 00000288 0000000000000000            dq 0x0000000000000000           ; Null descriptor
+   447 00000290 FFFF0000009ACF00            dq 0x00CF9A000000FFFF           ; 0x08: 32-bit code (P=1, S=1, type=code, D/B=1)
+   448 00000298 00000000009AA000            dq 0x00A09A0000000000           ; 0x10: 64-bit long-mode code (L=1)
+   449 000002A0 FFFF00000092CF00            dq 0x00CF92000000FFFF           ; 0x18: 32-bit data (P=1, S=1, type=data)
+   450                                  ap_trampoline_gdt_ptr:
+   451 000002A8 1F00                        dw 0x1F  ; GDT limit (4 descriptors * 8 - 1 = 31 = 0x1F)
+   452 000002AA 20700000                    dd 0x7020  ; GDT base (0x7000 + 0x20, where ap_trampoline_gdt is located)
+   453                                  ; Pad to offset 0xA0 for 32-bit code
+   454 000002AE 90<rep 12h>             times (0xA0 - ($ - ap_trampoline_start)) db 0x90
+   455                                  ; 32-bit protected mode entry point
+   456                                  BITS 32
+   457                                  ap_trampoline_pm:
+   458                                      ; Set up data segments and stack in protected mode to avoid GP faults
+   459 000002C0 66B81800                    mov ax, 0x18            ; data selector (ap_trampoline_gdt index 3)
+   460 000002C4 8ED8                        mov ds, ax
+   461 000002C6 8EC0                        mov es, ax
+   462 000002C8 8ED0                        mov ss, ax
+   463 000002CA BC00400000                  mov esp, 0x4000
+   464                                  
+   465                                      ; Protected-mode marker: write 'P' to physical 0x8001
+   466 000002CF BF01800000                  mov edi, 0x8001
+   467 000002D4 C60750                      mov BYTE [edi], 'P'
+   468                                      ; Serial port 0xE9 debug 'P'
+   469 000002D7 66BAE900                    mov dx, 0x00E9
+   470 000002DB B050                        mov al, 'P'
+   471 000002DD EE                          out dx, al
+   472                                  
+   473                                      ; Load PML4 physical address into CR3
+   474 000002DE B8[00400002]                mov eax, pml4
+   475 000002E3 0F22D8                      mov cr3, eax
+   476                                  
+   477                                      ; Enable PAE (required for long mode)
+   478 000002E6 0F20E0                      mov eax, cr4
+   479 000002E9 83C820                      or  eax, (1 << 5)
+   480 000002EC 0F22E0                      mov cr4, eax
+   481                                  
+   482                                      ; Enable Long Mode (LME)
+   483 000002EF B9800000C0                  mov ecx, 0xC0000080
+   484 000002F4 0F32                        rdmsr
+   485 000002F6 0D00010000                  or  eax, (1 << 8)
+   486 000002FB 0F30                        wrmsr
+   487                                  
+   488                                      ; Enable paging (PG)
+   489 000002FD 0F20C0                      mov eax, cr0
+   490 00000300 0D00000080                  or  eax, (1 << 31)
+   491 00000305 0F22C0                      mov cr0, eax
+   492                                  
+   493                                      ; Far jump to 64-bit entry (GDT code selector = 0x10)
+   494                                      ; Use push/retf in 32-bit mode so the IP is a 32-bit immediate and avoids
+   495                                      ; relocations that need 16-bit truncation. Use selector 0x10 (index 2) which is
+   496                                      ; the 64-bit code descriptor in the trampoline GDT.
+   497 00000308 68F1700000                  push dword ap_trampoline_64_entry - ap_trampoline_start + 0x7000
+   498 0000030D 666A10                      push word 0x10
+   499 00000310 CB                          retf
+   500                                  
+   501                                  ; 64-bit long mode entry
+   502                                  BITS 64
+   503                                  ap_trampoline_64_entry:
+   504                                      ; Setup data segments
+   505 00000311 66B81000                    mov ax, 0x10
+   506 00000315 8ED8                        mov ds, ax
+   507 00000317 8EC0                        mov es, ax
+   508 00000319 8ED0                        mov ss, ax
+   509 0000031B 4831C0                      xor rax, rax
+   510 0000031E 8EE0                        mov fs, ax
+   511 00000320 8EE8                        mov gs, ax
+   512                                  
+   513                                      ; mark long-mode arrival early
+   514 00000322 BF02800000                  mov rdi, 0x8002
+   515 00000327 C6074C                      mov BYTE [rdi], 'L'
+   516                                      ; Serial port 0xE9 debug 'L'
+   517 0000032A 66BAE900                    mov dx, 0x00E9
+   518 0000032E B04C                        mov al, 'L'
+   519 00000330 EE                          out dx, al
+   520                                  
+   521                                      ; Setup stack: choose per-CPU stack based on local APIC ID
+   522                                      ; Read IA32_APIC_BASE MSR (0x1B) to find LAPIC physical base
+   523 00000331 B91B000000                  mov ecx, 0x1B
+   524 00000336 0F32                        rdmsr
+   525 00000338 C6074D                          mov BYTE [rdi], 'M'
+   526                                      ; Serial port 0xE9 debug 'L'
+   527 0000033B 66BAE900                    mov dx, 0x00E9
+   528 0000033F B04D                        mov al, 'M'
+   529 00000341 EE                          out dx, al
+   530                                      ; rdx:rax -> physical apic base
+   531 00000342 4889D3                      mov rbx, rdx
+   532 00000345 48C1E320                    shl rbx, 32
+   533 00000349 4809C3                      or  rbx, rax
+   534 0000034C 4881E300F0FFFF              and rbx, 0xFFFFF000
+   534          ******************       warning: signed dword immediate exceeds bounds [-w+number-overflow]
+   534          ******************       warning: dword data exceeds bounds [-w+number-overflow]
+   535 00000353 48B8000000000080FF-         mov rax, HHDM_BASE
+   535 0000035C FF                 
+   536 0000035D 4801C3                      add rbx, rax
+   537                                      ; read APIC ID from LAPIC ID register (offset 0x20, ID in bits 24..31)
+   538 00000360 8B4320                      mov eax, dword [rbx + 0x20]
+   539 00000363 C1E818                      shr eax, 24
+   540 00000366 25FF000000                  and eax, 0xFF
+   541                                      ; EAX now contains the APIC ID (writing to EAX zero-extends RAX)
+   542                                      ; multiply by AP_STACK_SIZE (32768 = 0x8000) using shift (<< 15) on RAX
+   543 0000036B 48C1E00F                    sal rax, 15
+   544 0000036F BB[00400000]                mov ebx, stack_top
+   545 00000374 83C300                      add ebx, ap_stacks - stack_top
+   546 00000377 48B9000000000080FF-         mov rcx, HHDM_BASE
+   546 00000380 FF                 
+   547 00000381 4801CB                      add rbx, rcx
+   548 00000384 4801D8                      add rax, rbx
+   549                                      ; point to top of stack for that AP
+   550 00000387 480500800000                add rax, AP_STACK_SIZE
+   551 0000038D 4889C4                      mov rsp, rax
+   552                                  
+   553                                      ; Call kernel-provided `ap_entry` in the future (hook point).
+   554                                      ; Invoke `ap_entry` (if present) so the AP can perform kernel init. If it returns,
+   555                                      ; halt the AP.
+   556                                      extern ap_entry
+   557 00000390 E8(00000000)                call ap_entry
+   558                                      
+   559                                      ; If ap_entry returns, halt the AP
+   560 00000395 FA                          cli
+   561 00000396 F4                          hlt
+   562 00000397 EBFE                        jmp $
+   563                                  ap_trampoline_end:
+   564                                  
+   565                                  global ap_trampoline_size
+   566 00000399 7901000000000000        ap_trampoline_size: dq ap_trampoline_end - ap_trampoline_start
+   567                                  
+   568                                  ; Symbols provided by linker (physical addresses for MB2 address tag)
+   569                                  extern _kernel_load_end
+   570                                  extern _kernel_bss_end
